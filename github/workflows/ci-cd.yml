@@ -1,0 +1,89 @@
+name: Multi-Language CI/CD on EC2
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:          # allow manual runs from the GitHub UI
+
+jobs:
+  run-on-ec2:
+    name: Run Programs on EC2
+    runs-on: ubuntu-latest    # GitHub-hosted runner SSHs into your EC2
+
+    steps:
+      # ── 1. Checkout so we can inspect the diff locally if needed ──
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. SSH into EC2 and execute everything there ──────────────
+      - name: Deploy & run on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:        ${{ secrets.EC2_HOST }}       # EC2 public IP / hostname
+          username:    ${{ secrets.EC2_USER }}       # e.g. ubuntu
+          key:         ${{ secrets.EC2_SSH_KEY }}    # private key (PEM contents)
+          port:        22
+          script: |
+            set -euo pipefail
+
+            # ── Variables ──────────────────────────────────────────
+            REPO_DIR="$HOME/multi-lang-runner"
+            REPO_URL="https://github.com/${{ github.repository }}.git"
+            BRANCH="${{ github.ref_name }}"
+
+            echo "========================================"
+            echo "  EC2 CI/CD — $(date)"
+            echo "  Branch : $BRANCH"
+            echo "========================================"
+
+            # ── Clone or pull latest code ──────────────────────────
+            if [ -d "$REPO_DIR/.git" ]; then
+              echo "[GIT] Pulling latest changes..."
+              git -C "$REPO_DIR" fetch origin
+              git -C "$REPO_DIR" checkout "$BRANCH"
+              git -C "$REPO_DIR" reset --hard "origin/$BRANCH"
+            else
+              echo "[GIT] Cloning repository..."
+              git clone --branch "$BRANCH" "$REPO_URL" "$REPO_DIR"
+            fi
+
+            # ── Ensure runtimes are installed ──────────────────────
+            echo "[RUNTIME] Checking Python..."
+            if ! command -v python3 &>/dev/null; then
+              sudo apt-get update -qq
+              sudo apt-get install -y python3
+            fi
+            python3 --version
+
+            echo "[RUNTIME] Checking Java..."
+            if ! command -v java &>/dev/null; then
+              sudo apt-get update -qq
+              sudo apt-get install -y default-jdk
+            fi
+            java -version
+
+            # ── Run both programs ──────────────────────────────────
+            chmod +x "$REPO_DIR/scripts/run_all.sh"
+            "$REPO_DIR/scripts/run_all.sh"
+
+            # ── Show last log to GitHub Actions console ────────────
+            echo ""
+            echo "=== Latest log file ==="
+            ls -t "$REPO_DIR/logs/" | head -1 | \
+              xargs -I{} cat "$REPO_DIR/logs/{}"
+
+      # ── 3. Optional: upload the log as a GitHub Actions artifact ──
+      - name: Fetch log from EC2
+        if: always()
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          port:     22
+          script: |
+            # Print a parseable summary for the Actions UI
+            LATEST=$(ls -t "$HOME/multi-lang-runner/logs/" | head -1)
+            echo "::notice title=EC2 Log::$(cat "$HOME/multi-lang-runner/logs/$LATEST")"
